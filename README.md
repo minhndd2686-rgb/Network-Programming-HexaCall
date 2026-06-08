@@ -1,5 +1,5 @@
 # HexaCall - Hệ Thống Video Conferencing Đa Luồng
-
+```
 Dự án lập trình mạng UDP/TCP hỗ trợ 6 clients.
 HexaCall/
 │
@@ -30,6 +30,7 @@ HexaCall/
 │
 └── docs/                    # G3: Lưu trữ tài liệu, template Word/Slides
     └── .gitkeep             # File rỗng để Git giữ lại thư mục này
+```
 ## Cài đặt môi trường
 1. Tạo môi trường ảo: python -m venv .venv
 2. Kích hoạt (Windows): .venv\Scripts\activate
