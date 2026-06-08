@@ -5,10 +5,10 @@ import argparse
 
 from room_manager import RoomManager
 
-# Cấu hình mặc định
+#default config
 HOST = "0.0.0.0"
 PORT = 8000
-BACKLOG = 5
+BACKLOG = 6
 RECV_BUF = 4096
 
 logging.basicConfig(
@@ -37,7 +37,7 @@ class MasterServer:
             self.sock.close()
 
     def _accept_loop(self):
-        self.sock.settimeout(1.0)  # Thêm timeout để bắt được KeyboardInterrupt trên Windows
+        self.sock.settimeout(1.0)  # add timeout to catch keyboardInterupt
         while True:
             try:
                 conn, addr = self.sock.accept()
@@ -68,7 +68,7 @@ class MasterServer:
                     data = conn.recv(RECV_BUF)
                     if not data:
                         break
-                    # Hiện tại chỉ log. Sau này parse message, route, v.v.
+
                     msg = data.decode('utf-8', errors='ignore').strip()
                     conn.sendall(msg.encode())
                     logging.info(f"MSG from {client_id}: {msg}")
