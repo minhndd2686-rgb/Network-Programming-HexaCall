@@ -7,15 +7,16 @@ logging.basicConfig(
 )
 
 class RoomManager:
-    def __init__(self):
-        # Lưu trữ client: {client_id: {"conn": conn, "addr": addr, "room": room_id}}
+    def __init__(self, max_clients: int = 6):
+        # clients: {client_id: {"conn": conn, "addr": addr, "room": room_id}}
         self.clients = {}
-        # Lưu trữ phòng: {room_id: [client_id1, client_id2, ...]}
+        # rooms: {room_id: [client_id1, client_id2, ...]}
         self.rooms = {}
         self.lock = threading.Lock()
+        self.max_clients = max_clients
 
     def add_client(self, client_id, conn, addr):
-        """Thêm client mới vào danh sách quản lý chung."""
+        """add new client into list."""
         with self.lock:
             self.clients[client_id] = {
                 "conn": conn,
@@ -25,7 +26,7 @@ class RoomManager:
             logging.info("RoomManager: Added client %s", client_id)
 
     def remove_client(self, client_id):
-        """Xóa client và dọn dẹp khỏi các phòng."""
+        """delete client clean rooms."""
         with self.lock:
             if client_id in self.clients:
                 room_id = self.clients[client_id]["room"]
@@ -35,13 +36,17 @@ class RoomManager:
                 logging.info("RoomManager: Removed client %s", client_id)
 
     def join_room(self, client_id, room_id):
-        """Cho client tham gia vào một phòng cụ thể."""
+        """Add the client to a specific room."""
         with self.lock:
             if client_id not in self.clients:
                 return False
 
             if room_id not in self.rooms:
                 self.rooms[room_id] = []
+            
+            if len(self.rooms[room_id]) >= self.max_clients:
+                logging.info(f"Room {room_id} is full (max {self.max_clients}).")
+                return False
 
             if client_id not in self.rooms[room_id]:
                 self.rooms[room_id].append(client_id)
@@ -51,14 +56,14 @@ class RoomManager:
             return False
 
     def _leave_room_internal(self, client_id, room_id):
-        """Hàm nội bộ để xóa client khỏi phòng (không dùng lock riêng)"""
+        """Internal function to remove a client from the room (without using a separate lock)"""
         if room_id in self.rooms and client_id in self.rooms[room_id]:
             self.rooms[room_id].remove(client_id)
             if not self.rooms[room_id]:
                 del self.rooms[room_id]
 
     def leave_room(self, client_id, room_id):
-        """Cho client rời khỏi phòng."""
+        """Let the client leave the room."""
         with self.lock:
             self._leave_room_internal(client_id, room_id)
             if client_id in self.clients:
@@ -67,6 +72,6 @@ class RoomManager:
             return True
 
     def get_room_participants(self, room_id):
-        """Lấy danh sách ID các client trong phòng."""
+        """Get the list of client IDs in the room."""
         with self.lock:
             return list(self.rooms.get(room_id, []))
