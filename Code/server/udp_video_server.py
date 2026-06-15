@@ -67,12 +67,12 @@ class UdpVideoServer:
 
                 client_id, room_id, frame_id, chunk_idx, total_chunks, payload = unpacked
 
-                # 2. Handling routing
-                # Phase 2: Echo back (Single-client streaming test)
-                self._echo_packet(data, addr)
+                # 2. Update dynamic UDP address mapping in RoomManager
+                if self.room_manager:
+                    self.room_manager.set_udp_addr(client_id, addr)
 
-                # Phase 3 (Next): Routing qua RoomManager
-                # self._route_packet(data, room_id, client_id)
+                # 3. Route to room participants
+                self._route_packet(data, room_id, client_id)
 
             except socket.timeout:
                 continue
@@ -92,9 +92,9 @@ class UdpVideoServer:
         if not self.room_manager:
             return
 
-        participants = self.room_manager.get_room_participants(room_id)
-        for p_id in participants:
-            if p_id != sender_id:
-                # Need to map client_id (TCP) to UDP address (IP, Port)
-                # or the client has to send the UDP port registration first.
-                pass
+        udp_targets = self.room_manager.get_room_participants_udp(room_id, exclude_id=sender_id)
+        for target_addr in udp_targets:
+            try:
+                self.sock.sendto(data, target_addr)
+            except Exception as e:
+                self.logger.error(f"Failed to forward packet to {target_addr}: {e}")

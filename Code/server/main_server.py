@@ -2,9 +2,15 @@ import socket
 import threading
 import logging
 import argparse
+import sys
+import os
 
-from room_manager import RoomManager
-from udp_video_server import UdpVideoServer
+# Add project root to sys.path to import shared modules
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from Code.server.room_manager import RoomManager
+from Code.server.udp_video_server import UdpVideoServer
+from Code.shared.protocol import recv_message, send_message, PacketType
 
 #default config
 HOST = "0.0.0.0"
@@ -57,21 +63,24 @@ class MasterServer:
 
     def _accept_loop(self):
         self.sock.settimeout(1.0)  # add timeout to catch keyboardInterupt
+        client_counter = 1
         while True:
             try:
                 conn, addr = self.sock.accept()
             except socket.timeout:
                 continue
 
-            client_id = f"{addr[0]}:{addr[1]}"
-            logging.info(f"Client connected: {client_id}")
+            # client_id is int for protocol compatibility
+            client_id = client_counter
+            client_counter += 1
+            logging.info(f"Client connected: {addr} (Assigned ID: {client_id})")
 
-            self.room_manager.add_client(client_id, conn,addr)
+            self.room_manager.add_client(client_id, conn, addr)
 
             th = threading.Thread(
                 target = self.handle_client,
-                args = (conn,addr,client_id),
-                daemon= True
+                args = (conn, addr, client_id),
+                daemon = True
             )
             th.start()
 
@@ -79,24 +88,57 @@ class MasterServer:
             # th = threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True)
             # th.start()
 
-    def handle_client(self, conn: socket.socket, addr, client_id):
+    def handle_client(self, conn: socket.socket, addr, client_id: int):
+        """
+        Handle one TCP client in its own thread.
+        Parses structured messages (LOGIN, JOIN_ROOM, LEAVE_ROOM)
+        and replies with ROOM_STATE or ERROR.
+        """
         try:
-            with conn:
-                logging.info("Handler started for %s", addr)
-                while True:
-                    data = conn.recv(RECV_BUF)
-                    if not data:
-                        break
+            logging.info("Handler started for %s (id=%d)", addr, client_id)
 
-                    msg = data.decode('utf-8', errors='ignore').strip()
-                    conn.sendall(msg.encode())
-                    logging.info(f"MSG from {client_id}: {msg}")
-                    logging.debug("Received %d bytes from %s", len(data), addr)
+            # Immediately confirm assignment so client knows its numeric id
+            send_message(conn, PacketType.LOGIN, {"client_id": client_id})
+
+            while True:
+                msg_type, payload = recv_message(conn)
+                if msg_type is None:
+                    break  # Client disconnected or malformed frame
+
+                logging.info("MSG from id=%d type=%d payload=%s", client_id, msg_type, payload)
+
+                if msg_type == PacketType.JOIN_ROOM:
+                    room_id = payload.get("room_id")
+                    if room_id is None:
+                        send_message(conn, PacketType.ERROR, {"reason": "Missing room_id"})
+                        continue
+
+                    success = self.room_manager.join_room(client_id, room_id)
+                    if success:
+                        participants = self.room_manager.get_room_participants(room_id)
+                        send_message(conn, PacketType.ROOM_STATE, {
+                            "room_id": room_id,
+                            "participants": participants,
+                        })
+                    else:
+                        send_message(conn, PacketType.ERROR, {"reason": "Room full or already joined"})
+
+                elif msg_type == PacketType.LEAVE_ROOM:
+                    room_id = payload.get("room_id")
+                    if room_id is None:
+                        send_message(conn, PacketType.ERROR, {"reason": "Missing room_id"})
+                        continue
+                    self.room_manager.leave_room(client_id, room_id)
+                    send_message(conn, PacketType.ROOM_STATE, {"room_id": room_id, "participants": []})
+
+                else:
+                    logging.warning("Unknown msg_type=%d from id=%d", msg_type, client_id)
+
         except Exception as e:
             logging.exception("Error in client handler %s: %s", addr, e)
         finally:
             self.room_manager.remove_client(client_id)
-            logging.info("Client disconnected %s", addr)
+            logging.info("Client disconnected %s (id=%d)", addr, client_id)
 
 
 if __name__ == "__main__":
