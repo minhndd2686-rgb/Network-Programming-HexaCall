@@ -4,10 +4,12 @@ import logging
 import argparse
 
 from room_manager import RoomManager
+from udp_video_server import UdpVideoServer
 
 #default config
 HOST = "0.0.0.0"
 PORT = 8000
+UDP_PORT = 5000
 BACKLOG = 6
 RECV_BUF = 4096
 
@@ -17,24 +19,41 @@ logging.basicConfig(
 )
 
 class MasterServer:
-    def __init__(self, host: str = HOST, port: int = PORT):
+    def __init__(self, host: str = HOST, tcp_port: int = PORT, udp_port: int = UDP_PORT):
         self.host = host
-        self.port = port
+        self.tcp_port = tcp_port
+        self.udp_port = udp_port
+
+        # TCP Setup
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Giúp restart nhanh khi dev
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         self.room_manager = RoomManager()
 
+        # UDP Setup
+        self.udp_server = UdpVideoServer(host=self.host, port=self.udp_port, room_manager=self.room_manager)
+
     def start(self):
-        self.sock.bind((self.host, self.port))
+        # Start UDP Server
+        self.udp_server.start()
+
+        # Start TCP Server
+        self.sock.bind((self.host, self.tcp_port))
         self.sock.listen(BACKLOG)
-        logging.info("MasterServer listening on %s:%d", self.host, self.port)
+        logging.info("MasterServer (TCP) listening on %s:%d", self.host, self.tcp_port)
         try:
             self._accept_loop()
         except KeyboardInterrupt:
             logging.info("Shutting down server (KeyboardInterrupt)")
         finally:
-            self.sock.close()
+            self.stop()
+
+    def stop(self):
+        """Cleanup all server resources."""
+        logging.info("MasterServer stopping...")
+        self.udp_server.stop()
+        self.sock.close()
+        logging.info("MasterServer stopped.")
 
     def _accept_loop(self):
         self.sock.settimeout(1.0)  # add timeout to catch keyboardInterupt
