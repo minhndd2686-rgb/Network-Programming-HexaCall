@@ -154,8 +154,8 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1", help="Server IP")
     parser.add_argument("--tcp", type=int, default=8000, help="Server TCP port")
     parser.add_argument("--udp", type=int, default=5000, help="Server UDP port")
-    parser.add_argument("--room", default="room1", help="Room to join")
+    parser.add_argument("--room", type=int, default=1, help="Room ID (integer)")
     args = parser.parse_args()
 
     client = HexaClient(args.host, args.tcp, args.udp)
-    client.run()
+    client.run(args.room)
