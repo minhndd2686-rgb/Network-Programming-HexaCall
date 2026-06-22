@@ -75,6 +75,10 @@ class MasterServer:
 
             # client_id is int for protocol compatibility (monotonic counter)
             client_id = next(self.client_counter)
+            if client_id > 65535:
+                logging.error("Server capacity reached (client_id > 65535)")
+                conn.close()
+                continue
             logging.info(f"Client connected: {addr} (Assigned ID: {client_id})")
 
             # Store client using numeric ID (do NOT use addr/IP:port as identifier)
@@ -110,10 +114,24 @@ class MasterServer:
 
                 logging.info("MSG from id=%d type=%d payload=%s", client_id, msg_type, payload)
 
+                if not isinstance(payload, dict):
+                    send_message(conn, PacketType.ERROR, {"reason": "Invalid payload format"})
+                    continue
+
                 if msg_type == PacketType.JOIN_ROOM:
-                    room_id = payload.get("room_id")
-                    if room_id is None:
+                    room_id_raw = payload.get("room_id")
+                    if room_id_raw is None:
                         send_message(conn, PacketType.ERROR, {"reason": "Missing room_id"})
+                        continue
+                    if isinstance(room_id_raw, bool):
+                        send_message(conn, PacketType.ERROR, {"reason": "Invalid room_id type"})
+                        continue
+                    try:
+                        room_id = int(room_id_raw)
+                        if not (0 <= room_id <= 65535):
+                            raise ValueError()
+                    except (ValueError, TypeError):
+                        send_message(conn, PacketType.ERROR, {"reason": "Invalid room_id format"})
                         continue
 
                     success = self.room_manager.join_room(client_id, room_id)
@@ -127,9 +145,19 @@ class MasterServer:
                         send_message(conn, PacketType.ERROR, {"reason": "Room full or already joined"})
 
                 elif msg_type == PacketType.LEAVE_ROOM:
-                    room_id = payload.get("room_id")
-                    if room_id is None:
+                    room_id_raw = payload.get("room_id")
+                    if room_id_raw is None:
                         send_message(conn, PacketType.ERROR, {"reason": "Missing room_id"})
+                        continue
+                    if isinstance(room_id_raw, bool):
+                        send_message(conn, PacketType.ERROR, {"reason": "Invalid room_id type"})
+                        continue
+                    try:
+                        room_id = int(room_id_raw)
+                        if not (0 <= room_id <= 65535):
+                            raise ValueError()
+                    except (ValueError, TypeError):
+                        send_message(conn, PacketType.ERROR, {"reason": "Invalid room_id format"})
                         continue
                     self.room_manager.leave_room(client_id, room_id)
                     send_message(conn, PacketType.ROOM_STATE, {"room_id": room_id, "participants": []})

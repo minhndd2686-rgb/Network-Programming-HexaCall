@@ -67,9 +67,15 @@ class UdpVideoServer:
 
                 client_id, room_id, frame_id, chunk_idx, total_chunks, payload = unpacked
 
-                # 2. Update dynamic UDP address mapping in RoomManager
+                # 2. Authorize sender: client must exist via TCP and be in the claimed room,
+                #    and UDP source address must match previously bound address (anti-hijack).
                 if self.room_manager:
-                    self.room_manager.set_udp_addr(client_id, addr)
+                    if not self.room_manager.bind_udp_addr_if_allowed(client_id, room_id, addr):
+                        self.logger.debug(
+                            "Dropped UDP packet: client_id=%s room_id=%s addr=%s not authorized",
+                            client_id, room_id, addr
+                        )
+                        continue
 
                 # 3. Route to room participants
                 self._route_packet(data, room_id, client_id)

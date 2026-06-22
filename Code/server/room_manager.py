@@ -26,14 +26,45 @@ class RoomManager:
             }
             logging.info("RoomManager: Added client %s", client_id)
 
-    def set_udp_addr(self, client_id, udp_addr):
-        """Dynamically set the UDP address for a client after they send a frame."""
+    def is_client_in_room(self, client_id: int, room_id: int) -> bool:
+        """Check if client is currently in the specified room."""
+        with self.lock:
+            return room_id in self.rooms and client_id in self.rooms[room_id]
+
+    def get_client_room(self, client_id: int) -> int:
+        """Get the room_id the client is currently in, or None."""
         with self.lock:
             if client_id in self.clients:
-                old_addr = self.clients[client_id]["udp_addr"]
-                if old_addr != udp_addr:
-                    self.clients[client_id]["udp_addr"] = udp_addr
-                    logging.info("RoomManager: UDP address for %s set to %s", client_id, udp_addr)
+                return self.clients[client_id].get("room")
+            return None
+
+    def bind_udp_addr_if_allowed(self, client_id: int, room_id: int, udp_addr: tuple) -> bool:
+        """
+        Authorize and bind a UDP address.
+        Returns True if authorized (packet should be routed), False otherwise.
+        """
+        with self.lock:
+            if client_id not in self.clients:
+                return False
+
+            # Client must actually be in the claimed room
+            actual_room = self.clients[client_id].get("room")
+            if actual_room != room_id:
+                return False
+
+            old_addr = self.clients[client_id].get("udp_addr")
+            if old_addr is None:
+                # First valid packet binds the address
+                self.clients[client_id]["udp_addr"] = udp_addr
+                logging.info("RoomManager: UDP address for %s bound to %s", client_id, udp_addr)
+                return True
+            elif old_addr == udp_addr:
+                # Address matches the binding
+                return True
+            else:
+                # Packet from a different address claiming this client_id (possible spoofing)
+                logging.warning("RoomManager: Spoof attempt? UDP address %s claiming client %s (bound to %s)", udp_addr, client_id, old_addr)
+                return False
 
     def remove_client(self, client_id):
         """delete client clean rooms."""
@@ -78,6 +109,7 @@ class RoomManager:
             self._leave_room_internal(client_id, room_id)
             if client_id in self.clients:
                 self.clients[client_id]["room"] = None
+                self.clients[client_id]["udp_addr"] = None
             logging.info("RoomManager: Client %s left room %s", client_id, room_id)
             return True
 

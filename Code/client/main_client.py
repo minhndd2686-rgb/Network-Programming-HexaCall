@@ -58,8 +58,8 @@ class HexaClient:
             msg_type, payload = recv_message(self.tcp_sock)
 
             if msg_type == PacketType.ROOM_STATE:
-                self.room_id = room_id
-                logging.info(f"Joined Room: {room_id}. Current participants: {payload.get('participants')}")
+                self.room_id = int(room_id)
+                logging.info(f"Joined Room: {self.room_id}. Current participants: {payload.get('participants')}")
                 return True
             elif msg_type == PacketType.ERROR:
                 logging.error(f"Join Room failed: {payload.get('reason')}")
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1", help="Server IP")
     parser.add_argument("--tcp", type=int, default=8000, help="Server TCP port")
     parser.add_argument("--udp", type=int, default=5000, help="Server UDP port")
-    parser.add_argument("--room", type=int, default=1, help="Room ID (integer)")
+    parser.add_argument("--room", type=int, default=1, help="Room ID (integer) to join")
     args = parser.parse_args()
 
     client = HexaClient(args.host, args.tcp, args.udp)
