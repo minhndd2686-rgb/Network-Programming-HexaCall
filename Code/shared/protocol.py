@@ -42,8 +42,18 @@ def pack_message(msg_type: int, payload: Dict[str, Any]) -> bytes:
     header = struct.pack(TCP_HEADER_FORMAT, msg_type, payload_len)
     return header + payload_data
 
-def recv_all(sock: socket.socket, n: int) -> Optional[bytes]:
-    """Helper to receive exactly n bytes or return None if EOF"""
+def recv_all(sock: socket.socket, n: int, timeout: float = 5.0) -> Optional[bytes]:
+    """
+    Helper to receive exactly n bytes or return None if EOF/timeout.
+    
+    Args:
+        sock: Socket to receive from
+        n: Number of bytes to receive
+        timeout: Socket timeout in seconds (default 5.0)
+    
+    Returns:
+        bytes if successful, None if EOF or timeout
+    """
     data = bytearray()
     while len(data) < n:
         try:
@@ -53,21 +63,30 @@ def recv_all(sock: socket.socket, n: int) -> Optional[bytes]:
             data.extend(packet)
         except (socket.error, ConnectionResetError):
             return None
+        except socket.timeout:
+            return None
     return bytes(data)
 
-def recv_message(sock: socket.socket) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+def recv_message(sock: socket.socket, timeout: float = 5.0) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
     """
     Receives a complete TCP message using framing.
-    Returns (msg_type, payload_dict) or (None, None) on error/disconnect.
+    
+    Args:
+        sock: Socket to receive from
+        timeout: Socket timeout in seconds (default 5.0)
+    
+    Returns:
+        (msg_type, payload_dict) on success
+        (None, None) on error/disconnect/timeout
     """
-    header_data = recv_all(sock, TCP_HEADER_SIZE)
+    header_data = recv_all(sock, TCP_HEADER_SIZE, timeout)
     if not header_data:
         return None, None
 
     msg_type, payload_len = struct.unpack(TCP_HEADER_FORMAT, header_data)
 
     if payload_len > 0:
-        payload_data = recv_all(sock, payload_len)
+        payload_data = recv_all(sock, payload_len, timeout)
         if not payload_data:
             return None, None
         try:
