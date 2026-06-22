@@ -4,6 +4,7 @@ import logging
 import argparse
 import sys
 import os
+import itertools
 
 # Add project root to sys.path to import shared modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -39,6 +40,9 @@ class MasterServer:
         # UDP Setup
         self.udp_server = UdpVideoServer(host=self.host, port=self.udp_port, room_manager=self.room_manager)
 
+        # Client ID counter (use itertools.count to ensure monotonically increasing ints)
+        self.client_counter = itertools.count(1)
+
     def start(self):
         # Start UDP Server
         self.udp_server.start()
@@ -63,18 +67,17 @@ class MasterServer:
 
     def _accept_loop(self):
         self.sock.settimeout(1.0)  # add timeout to catch keyboardInterupt
-        client_counter = 1
         while True:
             try:
                 conn, addr = self.sock.accept()
             except socket.timeout:
                 continue
 
-            # client_id is int for protocol compatibility
-            client_id = client_counter
-            client_counter += 1
+            # client_id is int for protocol compatibility (monotonic counter)
+            client_id = next(self.client_counter)
             logging.info(f"Client connected: {addr} (Assigned ID: {client_id})")
 
+            # Store client using numeric ID (do NOT use addr/IP:port as identifier)
             self.room_manager.add_client(client_id, conn, addr)
 
             th = threading.Thread(
