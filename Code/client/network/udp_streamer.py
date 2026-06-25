@@ -20,8 +20,8 @@ class UdpStreamer:
     """
     def __init__(self, server_host, server_port, client_id, room_id, frame_processor):
         self.server_addr = (server_host, server_port)
-        self.client_id = client_id
-        self.room_id = room_id
+        self.client_id = int(client_id)
+        self.room_id = int(room_id)
         self.processor = frame_processor
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

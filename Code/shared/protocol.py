@@ -87,6 +87,31 @@ def send_message(sock: socket.socket, msg_type: int, payload: Dict[str, Any]):
 def pack_udp_chunk(client_id: int, room_id: int, frame_id: int, chunk_idx: int, total_chunks: int, data: bytes) -> bytes:
     """Packs a video chunk with its 20-byte binary header"""
     payload_len = len(data)
+
+    # Range validation
+    for name, value in {
+        "client_id": client_id,
+        "room_id": room_id,
+        "frame_id": frame_id,
+        "chunk_idx": chunk_idx,
+        "total_chunks": total_chunks,
+    }.items():
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer")
+
+    if not (0 <= client_id <= 65535):
+        raise ValueError(f"client_id {client_id} out of bounds")
+    if not (0 <= room_id <= 65535):
+        raise ValueError(f"room_id {room_id} out of bounds")
+    if not (0 <= frame_id <= 4294967295):
+        raise ValueError(f"frame_id {frame_id} out of bounds")
+    if not (0 <= chunk_idx <= 65535):
+        raise ValueError(f"chunk_idx {chunk_idx} out of bounds")
+    if not (1 <= total_chunks <= 65535):
+        raise ValueError(f"total_chunks {total_chunks} out of bounds")
+    if payload_len > UDP_MAX_PAYLOAD:
+        raise ValueError(f"payload_len {payload_len} exceeds max payload")
+
     header = struct.pack(
         UDP_HEADER_FORMAT,
         UDP_MAGIC,
@@ -116,6 +141,8 @@ def unpack_udp_chunk(data: bytes) -> Optional[Tuple[int, int, int, int, int, byt
 
     # Validation
     if magic != UDP_MAGIC or version != UDP_VERSION:
+        return None
+    if p_type != int(PacketType.VIDEO_DATA):
         return None
     if len(payload) != payload_len:
         return None
