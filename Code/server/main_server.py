@@ -17,8 +17,7 @@ from Code.shared.protocol import recv_message, send_message, PacketType
 HOST = "0.0.0.0"
 PORT = 8000
 UDP_PORT = 5000
-BACKLOG = 6
-MAX_CLIENTS = 6  # Global concurrent client limit (Phase C)
+MAX_CLIENTS = 6 
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,11 +45,11 @@ class MasterServer:
         # Monotonic client ID counter (uint16 range for UDP header compatibility)
         self.client_counter = itertools.count(1)
 
-        # Phase B: stop event lets _accept_loop exit cleanly without closing
+        # stop event lets _accept_loop exit cleanly without closing
         # the socket mid-accept (avoids WinError 10038 on Windows).
         self._stop_event = threading.Event()
 
-        # Phase B: track handler threads so stop() can join them.
+        # track handler threads so stop() can join them.
         # Protected by _threads_lock to allow concurrent append/remove.
         self._threads = []
         self._threads_lock = threading.Lock()
@@ -137,7 +136,7 @@ class MasterServer:
                 # Listening socket was closed by stop(); exit cleanly.
                 break
 
-            # Phase C: enforce global client limit before assigning id
+            # enforce global client limit before assigning id
             if self.room_manager.get_client_count() >= MAX_CLIENTS:
                 logging.warning("Server full: rejecting connection from %s", addr)
                 try:
