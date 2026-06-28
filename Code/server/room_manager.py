@@ -52,9 +52,21 @@ class RoomManager:
             if actual_room != room_id:
                 return False
 
+            # First UDP bind must come from the same IP used for TCP signaling.
+            # This blocks first-packet hijack attempts from a different host.
+            tcp_addr = self.clients[client_id].get("addr")
+            if tcp_addr and udp_addr[0] != tcp_addr[0]:
+                logging.warning(
+                    "RoomManager: UDP IP mismatch for client %s (tcp=%s udp=%s)",
+                    client_id,
+                    tcp_addr,
+                    udp_addr,
+                )
+                return False
+
             old_addr = self.clients[client_id].get("udp_addr")
             if old_addr is None:
-                # First valid packet binds the address
+                # First valid packet binds the UDP address after room and IP checks.
                 self.clients[client_id]["udp_addr"] = udp_addr
                 logging.info("RoomManager: UDP address for %s bound to %s", client_id, udp_addr)
                 return True
@@ -117,6 +129,30 @@ class RoomManager:
         """Get the list of client IDs in the room."""
         with self.lock:
             return list(self.rooms.get(room_id, []))
+
+    def get_room_connections(self, room_id):
+        """Return copied TCP connections for room broadcasts."""
+        with self.lock:
+            participants = self.rooms.get(room_id, [])
+            # Copy connection references while locked; caller sends outside lock.
+            return [
+                (c_id, self.clients[c_id]["conn"])
+                for c_id in participants
+                if c_id in self.clients
+            ]
+
+    def get_all_connections(self):
+        """Return copied TCP connections for clean server shutdown."""
+        with self.lock:
+            return [
+                (c_id, info["conn"])
+                for c_id, info in self.clients.items()
+            ]
+
+    def get_client_count(self):
+        """Return active TCP client count under lock."""
+        with self.lock:
+            return len(self.clients)
 
     def get_room_participants_udp(self, room_id, exclude_id=None):
         """Get the list of UDP addresses of all clients in the room, optionally excluding one."""
