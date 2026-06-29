@@ -17,6 +17,10 @@ from Code.shared.protocol import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# Timeout (seconds) for initial TCP connect + LOGIN handshake.
+# If the server is unreachable or silent, fail fast within this window.
+TCP_CONNECT_TIMEOUT = 5.0
+
 class HexaClient:
     def __init__(self, host='127.0.0.1', tcp_port=8000, udp_port=5000):
         self.server_host = host
@@ -37,6 +41,7 @@ class HexaClient:
         """Establish TCP signaling connection and get client ID."""
         try:
             self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.tcp_sock.settimeout(TCP_CONNECT_TIMEOUT)
             self.tcp_sock.connect((self.server_host, self.tcp_port))
 
             # 1. Receive LOGIN confirmation
@@ -44,9 +49,14 @@ class HexaClient:
             if msg_type == PacketType.LOGIN:
                 self.client_id = payload.get("client_id")
                 logging.info(f"Logged in as Client ID: {self.client_id}")
+
+                # Restore TCP socket to blocking mode for later signaling
+                self.tcp_sock.settimeout(None)
                 return True
             else:
                 logging.error(f"Failed to login. Expected LOGIN, got {msg_type}")
+        except socket.timeout:
+            logging.error(f"TCP Connection timed out after {TCP_CONNECT_TIMEOUT} seconds to {self.server_host}:{self.tcp_port}")
         except Exception as e:
             logging.error(f"TCP Connection error: {e}")
         return False
@@ -94,21 +104,21 @@ class HexaClient:
 
     def run(self, room_id=1):
         """Main loop to receive UDP chunks and render."""
-        if not self.connect():
-            return
-
-        if not self.join_room(room_id):
-            return
-
-        self.start_udp()
-
-        # Start sender thread
-        sender_thread = threading.Thread(target=self.sender_loop, daemon=True)
-        sender_thread.start()
-
-        logging.info("Streaming started. Press 'q' to quit.")
-
         try:
+            if not self.connect():
+                return
+
+            if not self.join_room(room_id):
+                return
+
+            self.start_udp()
+
+            # Start sender thread
+            sender_thread = threading.Thread(target=self.sender_loop, daemon=True)
+            sender_thread.start()
+
+            logging.info("Streaming started. Press 'q' to quit.")
+
             while not self.stop_event.is_set():
                 # Receive UDP chunks
                 data, _ = self.udp_sock.recvfrom(65535)
