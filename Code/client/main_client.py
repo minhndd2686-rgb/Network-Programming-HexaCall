@@ -1,6 +1,5 @@
 import socket
 import threading
-import cv2
 import logging
 import sys
 import os
@@ -82,6 +81,8 @@ class HexaClient:
         self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # Bind to 0 to let OS pick port
         self.udp_sock.bind(('0.0.0.0', 0))
+        # Small timeout so receive loop can check stop_event periodically
+        self.udp_sock.settimeout(1.0)
 
     def sender_loop(self):
         """Background thread to capture and send video chunks."""
@@ -90,7 +91,12 @@ class HexaClient:
 
         logging.info("Starting UDP Sender loop...")
         while not self.stop_event.is_set():
-            compressed_bytes = self.processor.capture_and_compress()
+            try:
+                compressed_bytes = self.processor.capture_and_compress()
+            except Exception as e:
+                logging.error(f"Capture error: {e}")
+                compressed_bytes = None
+
             if compressed_bytes:
                 # Use protocol to chunk the frame
                 chunks = chunk_frame(self.client_id, self.room_id, frame_id, compressed_bytes)
@@ -102,8 +108,12 @@ class HexaClient:
                         break
                 frame_id += 1
 
-    def run(self, room_id=1):
-        """Main loop to receive UDP chunks and render."""
+    def run(self, room_id=1, gui_window=None):
+        """Main loop to receive UDP chunks and dispatch frames to the GUI.
+
+        gui_window: optional MainWindow instance. If provided, frames are sent
+        into the GUI via its update_network_frame() API (thread-safe signal).
+        """
         try:
             if not self.connect():
                 return
@@ -117,28 +127,40 @@ class HexaClient:
             sender_thread = threading.Thread(target=self.sender_loop, daemon=True)
             sender_thread.start()
 
-            logging.info("Streaming started. Press 'q' to quit.")
+            logging.info("Streaming started. (GUI integrated: %s)" % (gui_window is not None))
 
             while not self.stop_event.is_set():
-                # Receive UDP chunks
-                data, _ = self.udp_sock.recvfrom(65535)
-                if not data:
-                    continue
+                try:
+                    # Receive UDP chunks (with socket timeout so we can react to stop_event)
+                    try:
+                        data, _ = self.udp_sock.recvfrom(65535)
+                    except socket.timeout:
+                        continue
 
-                unpacked = unpack_udp_chunk(data)
-                if unpacked:
-                    sender_id, room_id, f_id, c_idx, t_chunks, payload = unpacked
+                    if not data:
+                        continue
 
-                    # Feed into reassembler
-                    full_frame_bytes = self.reassembler.add_chunk(sender_id, f_id, c_idx, t_chunks, payload)
+                    unpacked = unpack_udp_chunk(data)
+                    if unpacked:
+                        sender_id, room_id, f_id, c_idx, t_chunks, payload = unpacked
 
-                    if full_frame_bytes:
-                        frame = self.processor.decompress_to_frame(full_frame_bytes)
-                        if frame is not None:
-                            window_name = f"HexaCall - Room {self.room_id} (Client {sender_id})"
-                            cv2.imshow(window_name, frame)
+                        # Feed into reassembler
+                        full_frame_bytes = self.reassembler.add_chunk(sender_id, f_id, c_idx, t_chunks, payload)
 
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                        if full_frame_bytes:
+                            frame = self.processor.decompress_to_frame(full_frame_bytes)
+                            if frame is not None:
+                                # Dispatch to GUI if available; otherwise log at debug level
+                                if gui_window is not None:
+                                    try:
+                                        gui_window.update_network_frame(sender_id, frame)
+                                    except Exception as e:
+                                        logging.error(f"Failed to update GUI frame: {e}")
+                                else:
+                                    logging.debug("Received frame for client %s but no GUI attached", sender_id)
+
+                except Exception as e:
+                    logging.error(f"Connection error: {e}")
                     break
         except KeyboardInterrupt:
             pass
@@ -155,9 +177,15 @@ class HexaClient:
             except:
                 pass
         if self.udp_sock:
-            self.udp_sock.close()
-        self.processor.cleanup()
-        cv2.destroyAllWindows()
+            try:
+                self.udp_sock.close()
+            except:
+                pass
+        try:
+            self.processor.cleanup()
+        except:
+            pass
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HexaCall Integrated Client")
@@ -168,4 +196,27 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     client = HexaClient(args.host, args.tcp, args.udp)
-    client.run(args.room)
+
+    # Try to integrate with PyQt GUI. If PyQt is not available, fall back to headless mode
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from Code.client.gui.main_window import MainWindow
+
+        app = QApplication(sys.argv)
+        window = MainWindow()
+        window.show()
+
+        # Run client in background thread so GUI event loop remains responsive
+        client_thread = threading.Thread(target=client.run, args=(args.room, window), daemon=True)
+        client_thread.start()
+
+        exit_code = app.exec()
+
+        # Ensure cleanup on exit
+        client.cleanup()
+        sys.exit(exit_code)
+
+    except Exception as e:
+        logging.warning(f"PyQt GUI not available or failed to start ({e}). Running in headless mode.")
+        # Run blocking (headless) mode without GUI. The run() will not display frames; it's intended for testing.
+        client.run(args.room)
