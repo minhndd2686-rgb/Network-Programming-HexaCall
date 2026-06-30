@@ -63,7 +63,7 @@ class MasterServer:
         self.udp_server.start()
 
         self.sock.bind((self.host, self.tcp_port))
-        self.sock.listen(BACKLOG)
+        self.sock.listen(MAX_CLIENTS)
         logging.info("MasterServer (TCP) listening on %s:%d", self.host, self.tcp_port)
         try:
             self._accept_loop()
