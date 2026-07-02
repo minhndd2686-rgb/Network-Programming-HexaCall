@@ -46,7 +46,7 @@ class CameraFrame(QLabel):
 
         self.camera_id = camera_id
         self.current_pixmap = None
-
+        self.setFixedSize(160, 160)  # Prevents widget from growing unpredictably
         self._set_waiting_state()
 
     def _set_waiting_state(self):
@@ -167,6 +167,8 @@ class MainWindow(QMainWindow):
 
         self.max_clients = max_clients
         self.video_frames = {}
+        self.client_slots = {}
+        self.slot_clients = {}
 
         self.setup_ui()
 
@@ -228,6 +230,33 @@ class MainWindow(QMainWindow):
                 column
             )
 
+    def _find_free_slot(self):
+        """Return first free GUI slot, or None if all slots are occupied."""
+
+        for slot_id in range(1, self.max_clients + 1):
+            if slot_id not in self.slot_clients:
+                return slot_id
+
+        return None
+
+    def _get_or_assign_slot(
+        self,
+        client_id: int
+    ):
+        """Return stable GUI slot for a network client ID."""
+
+        slot_id = self.client_slots.get(client_id)
+        if slot_id is not None:
+            return slot_id
+
+        slot_id = self._find_free_slot()
+        if slot_id is None:
+            return None
+
+        self.client_slots[client_id] = slot_id
+        self.slot_clients[slot_id] = client_id
+        return slot_id
+
     def update_network_frame(
         self,
         client_id: int,
@@ -266,17 +295,16 @@ class MainWindow(QMainWindow):
         Thread-safe slot executed in the GUI thread.
         """
 
-        if client_id in self.video_frames:
-
-            self.video_frames[
-                client_id
-            ].set_image(frame)
-
-        else:
-
+        slot_id = self._get_or_assign_slot(client_id)
+        if slot_id is None:
             print(
-                f"[WARNING] Unknown client ID: {client_id}"
+                f"[WARNING] No free video slot for client ID: {client_id}"
             )
+            return
+
+        self.video_frames[
+            slot_id
+        ].set_image(frame)
 
     @pyqtSlot(int)
     def handle_disconnect_slot(
@@ -288,15 +316,16 @@ class MainWindow(QMainWindow):
         a participant disconnects.
         """
 
-        if client_id in self.video_frames:
+        slot_id = self.client_slots.pop(client_id, None)
+        if slot_id is None:
+            return
 
-            self.video_frames[
-                client_id
-            ].reset()
+        self.slot_clients.pop(slot_id, None)
+        self.video_frames[slot_id].reset()
 
-            print(
-                f"[INFO] Client {client_id} disconnected."
-            )
+        print(
+            f"[INFO] Client {client_id} (slot {slot_id}) disconnected."
+        )
 
     def get_camera_frame(
         self,

@@ -4,6 +4,7 @@ import logging
 import sys
 import os
 import argparse
+import time
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -35,6 +36,7 @@ class HexaClient:
         self.processor = FrameProcessor()
         self.reassembler = FrameReassembler()
         self.stop_event = threading.Event()
+        self.gui_window = None
 
     def connect(self):
         """Establish TCP signaling connection and get client ID."""
@@ -85,19 +87,28 @@ class HexaClient:
         self.udp_sock.settimeout(1.0)
 
     def sender_loop(self):
-        """Background thread to capture and send video chunks."""
+        """Background thread to capture, locally preview, and send video chunks."""
         frame_id = 0
         server_udp_addr = (self.server_host, self.udp_port)
 
         logging.info("Starting UDP Sender loop...")
         while not self.stop_event.is_set():
             try:
-                compressed_bytes = self.processor.capture_and_compress()
+                # Ask FrameProcessor for both compressed bytes and raw frame in a single capture.
+                # The raw frame is reused for the local preview without re-reading the camera.
+                result = self.processor.capture_and_compress(return_frame=True)
             except Exception as e:
                 logging.error(f"Capture error: {e}")
-                compressed_bytes = None
+                result = (None, None)
 
-            if compressed_bytes:
+            compressed_bytes, raw_frame = result if isinstance(result, tuple) else (result, None)
+
+            if (
+                compressed_bytes
+                and self.client_id is not None
+                and self.room_id is not None
+                and self.udp_sock is not None
+            ):
                 # Use protocol to chunk the frame
                 chunks = chunk_frame(self.client_id, self.room_id, frame_id, compressed_bytes)
                 for chunk in chunks:
@@ -107,6 +118,23 @@ class HexaClient:
                         logging.error(f"UDP Send error: {e}")
                         break
                 frame_id += 1
+
+            # Local preview: reuse the raw frame captured above.
+            # Route through the same PyQt signal path as remote frames so the
+            # GUI thread owns all widget updates. The local client_id maps to
+            # the participant's own tile.
+            if (
+                raw_frame is not None
+                and self.gui_window is not None
+                and self.client_id is not None
+            ):
+                try:
+                    self.gui_window.update_network_frame(self.client_id, raw_frame)
+                except Exception as e:
+                    logging.error(f"Failed to update local preview: {e}")
+
+            # Keep preview/update rate bounded so the GUI event queue stays healthy.
+            time.sleep(0.03)
 
     def run(self, room_id=1, gui_window=None):
         """Main loop to receive UDP chunks and dispatch frames to the GUI.
@@ -122,6 +150,9 @@ class HexaClient:
                 return
 
             self.start_udp()
+
+            # Store gui_window reference before sender_loop starts so local preview is available immediately.
+            self.gui_window = gui_window
 
             # Start sender thread
             sender_thread = threading.Thread(target=self.sender_loop, daemon=True)

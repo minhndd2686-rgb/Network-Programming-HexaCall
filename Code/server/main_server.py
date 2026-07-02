@@ -15,8 +15,8 @@ from Code.shared.protocol import recv_message, send_message, PacketType
 
 # Default server config
 HOST = "0.0.0.0"
-PORT = 8000
-UDP_PORT = 5000
+TCP = 8000
+UDP = 5000
 MAX_CLIENTS = 6 
 
 logging.basicConfig(
@@ -26,7 +26,7 @@ logging.basicConfig(
 
 
 class MasterServer:
-    def __init__(self, host: str = HOST, tcp_port: int = PORT, udp_port: int = UDP_PORT):
+    def __init__(self, host: str = HOST, tcp_port: int = TCP, udp_port: int = UDP):
         self.host = host
         self.tcp_port = tcp_port
         self.udp_port = udp_port
@@ -301,9 +301,9 @@ class MasterServer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HexaCall Master TCP Server")
     parser.add_argument("--host", default=HOST, help="Bind host")
-    parser.add_argument("--port", type=int, default=PORT, help="Bind port")
-    parser.add_argument("--udp-port", type=int, default=UDP_PORT, help="UDP bind port")
+    parser.add_argument("--tcp", type=int, default=TCP, help="Bind port")
+    parser.add_argument("--udp", type=int, default=UDP, help="UDP bind port")
     args = parser.parse_args()
 
-    server = MasterServer(args.host, args.port, args.udp_port)
+    server = MasterServer(args.host, args.tcp, args.udp)
     server.start()
