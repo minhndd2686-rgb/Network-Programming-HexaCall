@@ -46,7 +46,7 @@ class CameraFrame(QLabel):
 
         self.camera_id = camera_id
         self.current_pixmap = None
-
+        self.setFixedSize(160, 160)  # Prevents widget from growing unpredictably
         self._set_waiting_state()
 
     def _set_waiting_state(self):

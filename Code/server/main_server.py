@@ -305,5 +305,5 @@ if __name__ == "__main__":
     parser.add_argument("--udp", type=int, default=UDP, help="UDP bind port")
     args = parser.parse_args()
 
-    server = MasterServer(args.host, args.port, args.udp_port)
+    server = MasterServer(args.host, args.tcp, args.udp)
     server.start()

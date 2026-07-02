@@ -4,6 +4,7 @@ import logging
 import sys
 import os
 import argparse
+import time
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -102,7 +103,12 @@ class HexaClient:
 
             compressed_bytes, raw_frame = result if isinstance(result, tuple) else (result, None)
 
-            if compressed_bytes:
+            if (
+                compressed_bytes
+                and self.client_id is not None
+                and self.room_id is not None
+                and self.udp_sock is not None
+            ):
                 # Use protocol to chunk the frame
                 chunks = chunk_frame(self.client_id, self.room_id, frame_id, compressed_bytes)
                 for chunk in chunks:
@@ -117,11 +123,18 @@ class HexaClient:
             # Route through the same PyQt signal path as remote frames so the
             # GUI thread owns all widget updates. The local client_id maps to
             # the participant's own tile.
-            if raw_frame is not None and self.gui_window is not None:
+            if (
+                raw_frame is not None
+                and self.gui_window is not None
+                and self.client_id is not None
+            ):
                 try:
                     self.gui_window.update_network_frame(self.client_id, raw_frame)
                 except Exception as e:
                     logging.error(f"Failed to update local preview: {e}")
+
+            # Keep preview/update rate bounded so the GUI event queue stays healthy.
+            time.sleep(0.03)
 
     def run(self, room_id=1, gui_window=None):
         """Main loop to receive UDP chunks and dispatch frames to the GUI.
