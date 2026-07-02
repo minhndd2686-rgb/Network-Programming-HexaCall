@@ -11,22 +11,32 @@ class FrameProcessor:
         if not self.cap.isOpened():
             print(f"Warning: Cannot open camera {self.camera_index}")
 
-    def capture_and_compress(self):
-        """Reads a frame from the camera and compresses it to JPEG bytes."""
+    def capture_and_compress(self, return_frame=False):
+        """Reads a frame from the camera and compresses it to JPEG bytes.
+
+        Args:
+            return_frame (bool): If True, returns tuple (jpeg_bytes, raw_frame).
+                                 If False, returns only jpeg_bytes (backward compatibility).
+
+        Returns:
+            bytes | tuple | None: JPEG bytes, or (jpeg_bytes, raw_frame) if return_frame=True.
+        """
         if not self.cap.isOpened():
-            return None
+            return None if not return_frame else (None, None)
 
         ret, frame = self.cap.read()
         if not ret:
-            return None
+            return None if not return_frame else (None, None)
 
         # Compress frame to JPEG
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
         result, encoded_frame = cv2.imencode('.jpg', frame, encode_param)
-        
+
         if result:
+            if return_frame:
+                return (encoded_frame.tobytes(), frame)
             return encoded_frame.tobytes()
-        return None
+        return None if not return_frame else (None, None)
 
     def decompress_to_frame(self, byte_data):
         """Decompresses JPEG bytes back into an OpenCV image frame."""
