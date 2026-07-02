@@ -219,6 +219,9 @@ class HexaClient:
 
 
 if __name__ == "__main__":
+    # Main entry point. Try to run GUI login flow, fallback to headless CLI when PyQt unavailable.
+
+    # Parse CLI args for headless/fallback mode (keep for backward compatibility)
     parser = argparse.ArgumentParser(description="HexaCall Integrated Client")
     parser.add_argument("--host", default="127.0.0.1", help="Server IP")
     parser.add_argument("--tcp", type=int, default=8000, help="Server TCP port")
@@ -226,28 +229,60 @@ if __name__ == "__main__":
     parser.add_argument("--room", type=int, default=1, help="Room ID (integer) to join")
     args = parser.parse_args()
 
-    client = HexaClient(args.host, args.tcp, args.udp)
-
-    # Try to integrate with PyQt GUI. If PyQt is not available, fall back to headless mode
+    # Try to integrate with PyQt GUI. If PyQt is not available, fall back to headless mode.
     try:
         from PyQt6.QtWidgets import QApplication
+        from Code.client.gui.login import LoginWindow
         from Code.client.gui.main_window import MainWindow
 
         app = QApplication(sys.argv)
-        window = MainWindow()
-        window.show()
 
-        # Run client in background thread so GUI event loop remains responsive
-        client_thread = threading.Thread(target=client.run, args=(args.room, window), daemon=True)
-        client_thread.start()
+        # Create login window
+        login_window = LoginWindow()
 
+        def on_login_connect(username, server_ip, port, room_id):
+            """Handle login form submission."""
+            # Close login window
+            login_window.close()
+
+            # Create HexaClient with validated parameters (UDP port = 5000 is server-managed)
+            gui_client = HexaClient(server_ip, port, udp_port=5000)
+
+            # Create main window and show
+            window = MainWindow()
+            window.show()
+
+            # Run client in background thread with room_id from GUI and window instance
+            client_thread = threading.Thread(
+                target=gui_client.run,
+                args=(room_id, window),
+                daemon=True
+            )
+            client_thread.start()
+
+            # Store client for cleanup
+            app.client = gui_client
+
+        # Connect login signal to handler
+        login_window.connect_requested.connect(on_login_connect)
+
+        # Show login window
+        login_window.show()
+
+        # Run Qt event loop. Ensure cleanup on exit.
         exit_code = app.exec()
 
-        # Ensure cleanup on exit
-        client.cleanup()
+        if hasattr(app, 'client'):
+            app.client.cleanup()
         sys.exit(exit_code)
 
     except Exception as e:
-        logging.warning(f"PyQt GUI not available or failed to start ({e}). Running in headless mode.")
-        # Run blocking (headless) mode without GUI. The run() will not display frames; it's intended for testing.
-        client.run(args.room)
+        # PyQt not available or failed to start -> run in headless mode (CLI args used)
+        logging.warning(
+            f"PyQt GUI not available or failed to start ({e}). "
+            "Running in headless mode using CLI args."
+        )
+        # Use args from CLI for headless run (connect -> join room)
+        headless_client = HexaClient(args.host, args.tcp, args.udp)
+        # Resume the CLI-assigned run() to join room (no GUI)
+        headless_client.run(args.room)
