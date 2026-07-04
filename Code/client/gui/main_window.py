@@ -104,19 +104,31 @@ class CameraFrame(QLabel):
         """Update camera on/off state and refresh UI."""
         self.camera_on = on
         if on:
-            self._set_waiting_state() if self.current_pixmap is None else self.update()
+            # Camera turned on - restore waiting or video frame
+            if self.current_pixmap is None:
+                self._set_waiting_state()
+            else:
+                self._refresh_pixmap()
+            self.update()
         else:
-            self.setText(f"Camera {self.camera_id}\n(Camera Off)")
+            # Camera turned off - show black background with message
+            self.current_pixmap = None
+            # Clear pixmap completely (must come BEFORE setText so text is visible)
+            self.setPixmap(QPixmap())
+            self.clear()
+            self.setText("the client turned off the camera")
             self.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.setStyleSheet("""
                 background-color: black;
-                color: #e74c3c;
+                color: #ffffff;
                 border: 2px solid #34495e;
                 border-radius: 8px;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: bold;
             """)
-        self.update()
+            # Force layout/word-wrap for long message
+            self.setWordWrap(True)
+            self.update()
 
     def set_mic_muted(self, muted: bool):
         """Update mic mute state and refresh UI."""
@@ -260,6 +272,14 @@ class MainWindow(QMainWindow):
         new_state = self.camera_btn.isChecked()
         self.camera_btn.setText("📷 Camera On" if new_state else "📷 Camera Off")
         self.client.set_camera_on(new_state)
+
+        # Immediately update local tile for instant feedback
+        local_client_id = self.client.client_id
+        if local_client_id is not None:
+            # Find the slot for this client
+            slot_id = self.client_slots.get(local_client_id)
+            if slot_id and slot_id in self.video_frames:
+                self.video_frames[slot_id].set_camera_on(new_state)
 
     def toggle_mic(self):
         """Toggle mic mute/unmute and inform client."""
