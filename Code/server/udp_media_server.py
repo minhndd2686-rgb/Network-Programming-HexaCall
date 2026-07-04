@@ -14,9 +14,9 @@ except ImportError:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from Code.shared.protocol import unpack_udp_chunk
 
-class UdpVideoServer:
+class UdpMediaServer:
     """
-    UDP Video Server handling video streaming.
+    UDP Media Server handling video and audio streaming.
     """
     def __init__(self, host='0.0.0.0', port=5000, room_manager=None):
         self.host = host
@@ -28,7 +28,7 @@ class UdpVideoServer:
 
         self._stop_event = threading.Event()
         self._thread = None
-        self.logger = logging.getLogger("UdpVideoServer")
+        self.logger = logging.getLogger("UdpMediaServer")
 
     def start(self):
         """Khởi chạy UDP server trong thread riêng."""

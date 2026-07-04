@@ -10,8 +10,8 @@ import itertools
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from Code.server.room_manager import RoomManager
-from Code.server.udp_video_server import UdpVideoServer
-from Code.shared.protocol import recv_message, send_message, PacketType
+from Code.server.udp_media_server import UdpMediaServer
+from Code.shared.protocol import recv_message, send_message, PacketType, AUDIO_BYTES_PER_FRAME
 
 # Default server config
 HOST = "0.0.0.0"
@@ -38,7 +38,7 @@ class MasterServer:
         self.room_manager = RoomManager()
 
         # UDP video routing server
-        self.udp_server = UdpVideoServer(
+        self.udp_server = UdpMediaServer(
             host=self.host, port=self.udp_port, room_manager=self.room_manager
         )
 
@@ -174,18 +174,18 @@ class MasterServer:
         """
         Broadcast updated ROOM_STATE to every current participant in room_id.
 
-        Snapshot connections first (inside RoomManager.lock), then send
-        outside the lock so a blocked socket send never deadlocks state
-        operations. Per-client errors are caught and logged; one bad socket
-        does not prevent delivery to other participants.
+        Includes full participant state (client_id, camera_on, mic_muted) for each member.
         """
         connections = self.room_manager.get_room_connections(room_id)
-        participants = [cid for cid, _ in connections]
+        # Use new method to get participant info with state
+        participant_data = self.room_manager.get_room_participants_with_state(room_id)
+
+        # Broadcast to all participants
         for cid, c in connections:
             try:
                 send_message(c, PacketType.ROOM_STATE, {
                     "room_id": room_id,
-                    "participants": participants,
+                    "participants": participant_data,
                 })
             except (OSError, ConnectionError) as e:
                 logging.warning(
@@ -247,6 +247,26 @@ class MasterServer:
                         self._broadcast_room_state(room_id)
                     else:
                         send_message(conn, PacketType.ERROR, {"reason": "Room full or already joined"})
+
+                elif msg_type == PacketType.ROOM_STATE:
+                    # Handle state update (camera_on, mic_muted) from client
+                    camera_on = payload.get("camera_on")
+                    mic_muted = payload.get("mic_muted")
+
+                    if camera_on is not None or mic_muted is not None:
+                        # This is a state update from client
+                        current_room = self.room_manager.get_client_room(client_id)
+                        if current_room:
+                            changed = self.room_manager.check_and_update_state(
+                                client_id,
+                                camera_on=camera_on,
+                                mic_muted=mic_muted
+                            )
+                            if changed:
+                                # Broadcast updated state to all in room
+                                self._broadcast_room_state(current_room)
+                                logging.info("Client %d state updated (camera_on=%s, mic_muted=%s) in room %d",
+                                           client_id, camera_on, mic_muted, current_room)
 
                 elif msg_type == PacketType.LEAVE_ROOM:
                     room_id_raw = payload.get("room_id")

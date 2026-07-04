@@ -1,5 +1,6 @@
 import logging
 import threading
+from typing import Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,7 +23,9 @@ class RoomManager:
                 "conn": conn,
                 "addr": addr,
                 "room": None,
-                "udp_addr": None
+                "udp_addr": None,
+                "camera_on": True,      # Camera on by default
+                "mic_muted": False      # Mic unmuted by default
             }
             logging.info("RoomManager: Added client %s", client_id)
 
@@ -96,7 +99,7 @@ class RoomManager:
 
             if room_id not in self.rooms:
                 self.rooms[room_id] = []
-            
+
             if len(self.rooms[room_id]) >= self.max_clients:
                 logging.info(f"Room {room_id} is full (max {self.max_clients}).")
                 return False
@@ -104,7 +107,10 @@ class RoomManager:
             if client_id not in self.rooms[room_id]:
                 self.rooms[room_id].append(client_id)
                 self.clients[client_id]["room"] = room_id
-                logging.info("RoomManager: Client %s joined room %s", client_id, room_id)
+                # Initialize camera/mic state
+                self.clients[client_id]["camera_on"] = True
+                self.clients[client_id]["mic_muted"] = False
+                logging.info("RoomManager: Client %s joined room %s (camera_on=True, mic_muted=False)", client_id, room_id)
                 return True
             return False
 
@@ -129,6 +135,24 @@ class RoomManager:
         """Get the list of client IDs in the room."""
         with self.lock:
             return list(self.rooms.get(room_id, []))
+
+    def get_room_participants_with_state(self, room_id: int) -> list:
+        """Return list of participant dicts with state for broadcast.
+
+        Each entry: {client_id, camera_on, mic_muted}
+        """
+        with self.lock:
+            participants = self.rooms.get(room_id, [])
+            result = []
+            for c_id in participants:
+                if c_id in self.clients:
+                    info = self.clients[c_id]
+                    result.append({
+                        "client_id": c_id,
+                        "camera_on": info.get("camera_on", True),
+                        "mic_muted": info.get("mic_muted", False)
+                    })
+            return result
 
     def get_room_connections(self, room_id):
         """Return copied TCP connections for room broadcasts."""
@@ -165,3 +189,20 @@ class RoomManager:
                     if addr:
                         udp_addrs.append(addr)
         return udp_addrs
+
+    def update_participant_state(self, client_id: int, camera_on: Optional[bool] = None, mic_muted: Optional[bool] = None) -> bool:
+        """Update camera/mic state for a client, broadcast if changed.
+
+        Returns True if state changed, False otherwise.
+        """
+        changed = False
+        with self.lock:
+            if client_id not in self.clients:
+                return False
+            if camera_on is not None and self.clients[client_id]["camera_on"] != camera_on:
+                self.clients[client_id]["camera_on"] = camera_on
+                changed = True
+            if mic_muted is not None and self.clients[client_id]["mic_muted"] != mic_muted:
+                self.clients[client_id]["mic_muted"] = mic_muted
+                changed = True
+        return changed
