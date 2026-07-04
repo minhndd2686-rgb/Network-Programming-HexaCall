@@ -5,11 +5,14 @@ import sys
 import os
 import argparse
 import time
+from collections import deque
+from typing import Optional
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from Code.client.media.frame_processor import FrameProcessor
+from Code.client.media.audio_processor import AudioProcessor, PYAUDIO_AVAILABLE
 from Code.shared.protocol import (
     recv_message, send_message, PacketType,
     chunk_frame, unpack_udp_chunk, FrameReassembler
@@ -37,6 +40,25 @@ class HexaClient:
         self.reassembler = FrameReassembler()
         self.stop_event = threading.Event()
         self.gui_window = None
+
+        # Audio/Video state gates
+        self.camera_on = threading.Event()
+        self.camera_on.set()  # Camera on by default
+        self.mic_muted = threading.Event()  # Mic unmuted by default
+
+        # Audio processor (None if PyAudio unavailable)
+        self.audio_processor: Optional[AudioProcessor] = None
+        if PYAUDIO_AVAILABLE:
+            try:
+                self.audio_processor = AudioProcessor()
+                logging.info("AudioProcessor initialized successfully")
+            except Exception as e:
+                logging.warning(f"Failed to initialize AudioProcessor: {e}")
+
+        # Audio jitter buffer for playback
+        self.audio_jitter_buffer = deque(maxlen=100)  # ~2 seconds buffer
+        self._audio_lock = threading.Lock()
+        self._audio_playback_thread: Optional[threading.Thread] = None
 
     def connect(self):
         """Establish TCP signaling connection and get client ID."""
@@ -87,54 +109,83 @@ class HexaClient:
         self.udp_sock.settimeout(1.0)
 
     def sender_loop(self):
-        """Background thread to capture, locally preview, and send video chunks."""
-        frame_id = 0
+        """Background thread to capture, locally preview, and send video/audio chunks."""
+        video_frame_id = 0
+        audio_frame_id = 0
         server_udp_addr = (self.server_host, self.udp_port)
 
-        logging.info("Starting UDP Sender loop...")
+        logging.info("Starting UDP Sender loop (video+audio)...")
+
+        # Audio preparation
+        if self.audio_processor:
+            if not self.audio_processor.start_capture():
+                logging.warning("Failed to start audio capture - microphone disabled")
+                self.audio_processor = None
+
         while not self.stop_event.is_set():
             try:
-                # Ask FrameProcessor for both compressed bytes and raw frame in a single capture.
-                # The raw frame is reused for the local preview without re-reading the camera.
-                result = self.processor.capture_and_compress(return_frame=True)
-            except Exception as e:
-                logging.error(f"Capture error: {e}")
-                result = (None, None)
+                # === VIDEO: Capture and send if camera is on ===
+                if self.camera_on.is_set():
+                    result = self.processor.capture_and_compress(return_frame=True)
+                else:
+                    result = (None, None)
 
-            compressed_bytes, raw_frame = result if isinstance(result, tuple) else (result, None)
+                compressed_bytes, raw_frame = result if isinstance(result, tuple) else (result, None)
 
-            if (
-                compressed_bytes
-                and self.client_id is not None
-                and self.room_id is not None
-                and self.udp_sock is not None
-            ):
-                # Use protocol to chunk the frame
-                chunks = chunk_frame(self.client_id, self.room_id, frame_id, compressed_bytes)
-                for chunk in chunks:
+                if (
+                    compressed_bytes
+                    and self.client_id is not None
+                    and self.room_id is not None
+                    and self.udp_sock is not None
+                ):
+                    # Use protocol to chunk the frame
+                    chunks = chunk_frame(self.client_id, self.room_id, video_frame_id, compressed_bytes)
+                    for chunk in chunks:
+                        try:
+                            self.udp_sock.sendto(chunk, server_udp_addr)
+                        except Exception as e:
+                            logging.error(f"UDP Send error: {e}")
+                            break
+                    video_frame_id += 1
+
+                # Local preview: reuse the raw frame captured above.
+                if (
+                    raw_frame is not None
+                    and self.gui_window is not None
+                    and self.client_id is not None
+                ):
                     try:
-                        self.udp_sock.sendto(chunk, server_udp_addr)
+                        self.gui_window.update_network_frame(self.client_id, raw_frame)
                     except Exception as e:
-                        logging.error(f"UDP Send error: {e}")
-                        break
-                frame_id += 1
+                        logging.error(f"Failed to update local preview: {e}")
 
-            # Local preview: reuse the raw frame captured above.
-            # Route through the same PyQt signal path as remote frames so the
-            # GUI thread owns all widget updates. The local client_id maps to
-            # the participant's own tile.
-            if (
-                raw_frame is not None
-                and self.gui_window is not None
-                and self.client_id is not None
-            ):
-                try:
-                    self.gui_window.update_network_frame(self.client_id, raw_frame)
-                except Exception as e:
-                    logging.error(f"Failed to update local preview: {e}")
+                # === AUDIO: Capture and send if mic not muted ===
+                if (
+                    not self.mic_muted.is_set()
+                    and self.audio_processor is not None
+                    and self.audio_processor.capture_active
+                    and self.client_id is not None
+                    and self.room_id is not None
+                    and self.udp_sock is not None
+                ):
+                    audio_bytes = self.audio_processor.read_frame()
+                    if audio_bytes:
+                        # Audio frame is small enough to not need chunking (640 bytes)
+                        # Use same chunk_frame function with PacketType.AUDIO_DATA
+                        chunks = chunk_frame(self.client_id, self.room_id, audio_frame_id, audio_bytes)
+                        for chunk in chunks:
+                            try:
+                                self.udp_sock.sendto(chunk, server_udp_addr)
+                            except Exception as e:
+                                logging.error(f"Audio UDP send error: {e}")
+                                break
+                        audio_frame_id += 1
+
+            except Exception as e:
+                logging.error(f"Sender loop error: {e}")
 
             # Keep preview/update rate bounded so the GUI event queue stays healthy.
-            time.sleep(0.03)
+            time.sleep(0.03)  # ~33 FPS
 
     def run(self, room_id=1, gui_window=None):
         """Main loop to receive UDP chunks and dispatch frames to the GUI.
@@ -158,6 +209,22 @@ class HexaClient:
             sender_thread = threading.Thread(target=self.sender_loop, daemon=True)
             sender_thread.start()
 
+            # Start TCP listener thread for ROOM_STATE updates
+            self.tcp_listener_thread = threading.Thread(target=self._tcp_listener_loop, daemon=True)
+            self.tcp_listener_thread.start()
+
+            if self.audio_processor:
+                if self.audio_processor.start_playback():
+                    self._audio_playback_thread = threading.Thread(
+                        target=self._audio_playback_loop,
+                        name="AudioPlayback",
+                        daemon=True
+                    )
+                    self._audio_playback_thread.start()
+                    logging.info("Audio playback thread started")
+                else:
+                    logging.warning("Failed to start audio playback")
+
             logging.info("Streaming started. (GUI integrated: %s)" % (gui_window is not None))
 
             while not self.stop_event.is_set():
@@ -179,16 +246,30 @@ class HexaClient:
                         full_frame_bytes = self.reassembler.add_chunk(sender_id, f_id, c_idx, t_chunks, payload)
 
                         if full_frame_bytes:
-                            frame = self.processor.decompress_to_frame(full_frame_bytes)
-                            if frame is not None:
-                                # Dispatch to GUI if available; otherwise log at debug level
-                                if gui_window is not None:
-                                    try:
-                                        gui_window.update_network_frame(sender_id, frame)
-                                    except Exception as e:
-                                        logging.error(f"Failed to update GUI frame: {e}")
-                                else:
-                                    logging.debug("Received frame for client %s but no GUI attached", sender_id)
+                            # Determine packet type from header (byte 5)
+                            pkt_type = data[5] if len(data) > 5 else PacketType.VIDEO_DATA
+
+                            if pkt_type == PacketType.VIDEO_DATA:
+                                # Video frame
+                                frame = self.processor.decompress_to_frame(full_frame_bytes)
+                                if frame is not None:
+                                    # Dispatch to GUI if available
+                                    if gui_window is not None:
+                                        try:
+                                            gui_window.update_network_frame(sender_id, frame)
+                                        except Exception as e:
+                                            logging.error(f"Failed to update GUI frame: {e}")
+                                    else:
+                                        logging.debug("Received frame for client %s but no GUI attached", sender_id)
+
+                            elif pkt_type == PacketType.AUDIO_DATA:
+                                # Audio frame - put into jitter buffer for playback
+                                with self._audio_lock:
+                                    self.audio_jitter_buffer.append(full_frame_bytes)
+                                # Signal GUI to update mic status if needed
+                                # (handled by ROOM_STATE from server)
+                            else:
+                                logging.debug("Unknown packet type: %d", pkt_type)
 
                 except Exception as e:
                     logging.error(f"Connection error: {e}")
@@ -201,21 +282,146 @@ class HexaClient:
     def cleanup(self):
         logging.info("Cleaning up...")
         self.stop_event.set()
-        if self.tcp_sock:
+
+        # Send LEAVE_ROOM message before disconnecting
+        if self.tcp_sock and self.room_id:
             try:
                 send_message(self.tcp_sock, PacketType.LEAVE_ROOM, {"room_id": self.room_id})
+            except:
+                pass
+
+        # Stop audio processing
+        if self.audio_processor:
+            self.audio_processor.cleanup()
+            self.audio_processor = None
+
+        # Wait for audio playback thread to exit
+        if self._audio_playback_thread and self._audio_playback_thread.is_alive():
+            self._audio_playback_thread.join(timeout=2.0)
+            self._audio_playback_thread = None
+
+        # Close sockets
+        if self.tcp_sock:
+            try:
                 self.tcp_sock.close()
             except:
                 pass
+            self.tcp_sock = None
+
         if self.udp_sock:
             try:
                 self.udp_sock.close()
             except:
                 pass
+            self.udp_sock = None
+
+        # Cleanup video processor
         try:
             self.processor.cleanup()
         except:
             pass
+
+        logging.info("Cleanup complete")
+
+    def set_camera_on(self, enabled: bool):
+        """Toggle camera on/off and send state update to server."""
+        if enabled:
+            self.camera_on.set()
+        else:
+            self.camera_on.clear()
+        self._send_state_update()
+
+    def set_mic_muted(self, muted: bool):
+        """Toggle mic mute/unmute and send state update to server."""
+        if muted:
+            self.mic_muted.set()
+        else:
+            self.mic_muted.clear()
+        self._send_state_update()
+
+    def _send_state_update(self):
+        """Send state update (camera_on, mic_muted) to server via ROOM_STATE."""
+        if not self.tcp_sock or self.room_id is None or self.client_id is None:
+            return
+
+        payload = {
+            "room_id": self.room_id,
+            "client_id": self.client_id,
+            "camera_on": self.camera_on.is_set(),
+            "mic_muted": self.mic_muted.is_set()
+        }
+
+        try:
+            # Use ROOM_STATE type for state updates
+            send_message(self.tcp_sock, PacketType.ROOM_STATE, payload)
+            logging.debug("Sent state update: client_id=%d, camera_on=%s, mic_muted=%s",
+                         self.client_id, payload["camera_on"], payload["mic_muted"])
+        except Exception as e:
+            logging.error(f"Failed to send state update: {e}")
+
+    def _audio_playback_loop(self):
+        """Background thread to play audio from jitter buffer."""
+        logging.info("Audio playback loop started")
+
+        while not self.stop_event.is_set():
+            try:
+                # Wait for audio data with timeout
+                with self._audio_lock:
+                    if self.audio_jitter_buffer and self.audio_processor:
+                        audio_data = self.audio_jitter_buffer.popleft()
+                        self.audio_processor.play_frame(audio_data)
+                    else:
+                        # No data, sleep briefly to avoid busy loop
+                        time.sleep(0.05)
+            except Exception as e:
+                logging.error(f"Audio playback loop error: {e}")
+                time.sleep(0.1)
+
+        logging.info("Audio playback loop exited")
+
+    def _tcp_listener_loop(self):
+        """Background thread to listen for ROOM_STATE updates from server."""
+        logging.info("TCP listener loop started")
+
+        while not self.stop_event.is_set():
+            try:
+                # Listen for TCP messages (ROOM_STATE broadcasts from server)
+                msg_type, payload = recv_message(self.tcp_sock)
+
+                if msg_type is None:
+                    # Connection closed or error
+                    logging.warning("TCP connection closed")
+                    break
+
+                if msg_type == PacketType.ROOM_STATE:
+                    # Update GUI with participant states
+                    participants = payload.get("participants", [])
+                    if self.gui_window and participants:
+                        for p in participants:
+                            try:
+                                client_id = p.get("client_id")
+                                camera_on = p.get("camera_on", True)
+                                mic_muted = p.get("mic_muted", False)
+
+                                # Get the CameraFrame for this client
+                                slot_id = self.gui_window.client_slots.get(client_id)
+                                if slot_id:
+                                    frame = self.gui_window.video_frames.get(slot_id)
+                                    if frame:
+                                        frame.set_camera_on(camera_on)
+                                        frame.set_mic_muted(mic_muted)
+                            except Exception as e:
+                                logging.error(f"Failed to update participant state: {e}")
+
+                elif msg_type == PacketType.ERROR:
+                    logging.warning(f"Server error: {payload.get('reason')}")
+
+            except Exception as e:
+                logging.error(f"TCP listener error: {e}")
+                break
+
+        logging.info("TCP listener loop exited")
+
 
 
 if __name__ == "__main__":
@@ -250,6 +456,7 @@ if __name__ == "__main__":
 
             # Create main window and show
             window = MainWindow()
+            window.set_client(gui_client)  # Wire client reference for toolbar
             window.show()
 
             # Run client in background thread with room_id from GUI and window instance

@@ -20,6 +20,14 @@ MTU = 1500
 # UDP Payload max = MTU - IP Header (20) - UDP Header (8) - Hexa Protocol Header (20)
 UDP_MAX_PAYLOAD = MTU - 20 - 8 - UDP_HEADER_SIZE
 
+# Audio Configuration
+AUDIO_SAMPLE_RATE = 16000  # Hz (16 kHz)
+AUDIO_CHANNELS = 1         # Mono
+AUDIO_SAMPLE_WIDTH = 2     # 16-bit = 2 bytes
+AUDIO_FRAME_MS = 20        # 20ms frames
+AUDIO_FRAME_SIZE = int(AUDIO_SAMPLE_RATE * AUDIO_FRAME_MS / 1000)  # 320 samples
+AUDIO_BYTES_PER_FRAME = AUDIO_FRAME_SIZE * AUDIO_SAMPLE_WIDTH  # 640 bytes
+
 class PacketType(IntEnum):
     """Protocol message types for HexaCall"""
     LOGIN = 1
@@ -29,6 +37,7 @@ class PacketType(IntEnum):
     ERROR = 5
     CHAT = 6
     VIDEO_DATA = 7  # UDP Video chunk
+    AUDIO_DATA = 8  # UDP Audio chunk
 
 # ==== TCP HELPERS (Signaling) ====
 
