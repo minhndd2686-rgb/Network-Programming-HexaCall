@@ -381,6 +381,8 @@ class HexaClient:
     def _mix_audio_frames(self) -> Optional[bytes]:
         """
         Mix audio frames from all sender buffers into a single frame.
+        Each sender contributes their LATEST frame (drop-oldest policy).
+        Skips own audio to prevent echo.
 
         Returns:
             Mixed audio bytes (PCM 16-bit mono) or None if no audio to play.
@@ -389,33 +391,41 @@ class HexaClient:
             if not self._sender_audio_buffers:
                 return None
 
-            # Collect frames from each sender
+            # Collect LATEST frame from each sender
             sender_frames = []
             senders_to_remove = []
 
             for sender_id, buffer in self._sender_audio_buffers.items():
+                # Skip own audio to prevent echo
                 if sender_id == self.client_id:
-                    # Skip own audio to prevent echo (server should already exclude, but defensive)
                     continue
 
                 if buffer:
-                    frame_bytes = buffer.popleft()
-                    # Convert to numpy array of int16
+                    # Take the LATEST frame (rightmost), drop older ones
+                    frame_bytes = buffer.pop()
                     frame = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.int32)
                     sender_frames.append(frame)
                 else:
-                    # Mark empty buffers for cleanup if they've been empty for a while
-                    pass  # We keep them for now
+                    # Mark empty buffers for removal
+                    senders_to_remove.append(sender_id)
+
+            # Clean up empty sender buffers
+            for sid in senders_to_remove:
+                del self._sender_audio_buffers[sid]
 
             if not sender_frames:
                 return None
 
-            # Mix: sum all frames with automatic clipping
+            # Mix: average all frames to prevent clipping
+            # When 6 people speak, averaging keeps volume reasonable
             mixed = np.zeros_like(sender_frames[0])
             for frame in sender_frames:
                 mixed += frame
 
-            # Clip to int16 range
+            # Normalize by number of senders (prevents clipping when 6 people speak)
+            mixed = mixed // len(sender_frames)
+
+            # Clip to int16 range (just in case)
             mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
 
             return mixed.tobytes()
@@ -456,6 +466,13 @@ class HexaClient:
 
         logging.info("Audio playback loop exited")
 
+    def _remove_sender_buffer(self, sender_id: int):
+        """Remove audio buffer when a sender disconnects."""
+        with self._audio_lock:
+            if sender_id in self._sender_audio_buffers:
+                del self._sender_audio_buffers[sender_id]
+                logging.debug("Removed audio buffer for disconnected client %d", sender_id)
+
     def _tcp_listener_loop(self):
         """Background thread to listen for ROOM_STATE updates from server."""
         logging.info("TCP listener loop started")
@@ -473,10 +490,13 @@ class HexaClient:
                 if msg_type == PacketType.ROOM_STATE:
                     # Update GUI with participant states
                     participants = payload.get("participants", [])
+                    current_participant_ids = set()
+
                     if self.gui_window and participants:
                         for p in participants:
                             try:
                                 client_id = p.get("client_id")
+                                current_participant_ids.add(client_id)
                                 camera_on = p.get("camera_on", True)
                                 mic_muted = p.get("mic_muted", False)
 
@@ -489,6 +509,14 @@ class HexaClient:
                                         frame.set_mic_muted(mic_muted)
                             except Exception as e:
                                 logging.error(f"Failed to update participant state: {e}")
+
+                    # Clean up audio buffers for disconnected participants
+                    with self._audio_lock:
+                        disconnected = set(self._sender_audio_buffers.keys()) - current_participant_ids
+                        for sid in disconnected:
+                            if sid != self.client_id:  # Don't remove own buffer
+                                del self._sender_audio_buffers[sid]
+                                logging.debug("Removed audio buffer for disconnected client %d", sid)
 
                 elif msg_type == PacketType.ERROR:
                     logging.warning(f"Server error: {payload.get('reason')}")
