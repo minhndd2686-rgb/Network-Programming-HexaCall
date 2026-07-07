@@ -93,8 +93,18 @@ def send_message(sock: socket.socket, msg_type: int, payload: Dict[str, Any]):
 
 # ==== UDP HELPERS (Video Streaming) ====
 
-def pack_udp_chunk(client_id: int, room_id: int, frame_id: int, chunk_idx: int, total_chunks: int, data: bytes) -> bytes:
-    """Packs a video chunk with its 20-byte binary header"""
+def pack_udp_chunk(client_id: int, room_id: int, frame_id: int, chunk_idx: int, total_chunks: int, data: bytes, pkt_type: int = PacketType.VIDEO_DATA) -> bytes:
+    """Packs a video or audio chunk with its 20-byte binary header.
+
+    Args:
+        client_id: Sender's client ID (0-65535)
+        room_id: Target room ID (0-65535)
+        frame_id: Frame/sequence number
+        chunk_idx: Current chunk index (0-based)
+        total_chunks: Total chunks for this frame
+        data: Payload bytes
+        pkt_type: Packet type (PacketType.VIDEO_DATA or PacketType.AUDIO_DATA)
+    """
     payload_len = len(data)
 
     # Range validation
@@ -125,7 +135,7 @@ def pack_udp_chunk(client_id: int, room_id: int, frame_id: int, chunk_idx: int, 
         UDP_HEADER_FORMAT,
         UDP_MAGIC,
         UDP_VERSION,
-        int(PacketType.VIDEO_DATA),
+        int(pkt_type),
         client_id,
         room_id,
         frame_id,
@@ -137,7 +147,7 @@ def pack_udp_chunk(client_id: int, room_id: int, frame_id: int, chunk_idx: int, 
 
 def unpack_udp_chunk(data: bytes) -> Optional[Tuple[int, int, int, int, int, bytes]]:
     """
-    Unpacks a video chunk.
+    Unpacks a video or audio chunk.
     Returns (client_id, room_id, frame_id, chunk_idx, total_chunks, payload) or None if invalid.
     """
     if len(data) < UDP_HEADER_SIZE:
@@ -151,15 +161,23 @@ def unpack_udp_chunk(data: bytes) -> Optional[Tuple[int, int, int, int, int, byt
     # Validation
     if magic != UDP_MAGIC or version != UDP_VERSION:
         return None
-    if p_type != int(PacketType.VIDEO_DATA):
+    if p_type not in (int(PacketType.VIDEO_DATA), int(PacketType.AUDIO_DATA)):
         return None
     if len(payload) != payload_len:
         return None
 
     return client_id, room_id, frame_id, chunk_idx, total_chunks, payload
 
-def chunk_frame(client_id: int, room_id: int, frame_id: int, frame_data: bytes) -> List[bytes]:
-    """Splits a large frame into multiple UDP-safe chunks"""
+def chunk_frame(client_id: int, room_id: int, frame_id: int, frame_data: bytes, pkt_type: int = PacketType.VIDEO_DATA) -> List[bytes]:
+    """Splits a large frame into multiple UDP-safe chunks.
+
+    Args:
+        client_id: Sender's client ID.
+        room_id: Target room ID.
+        frame_id: Frame/sequence number.
+        frame_data: Raw bytes to chunk.
+        pkt_type: Packet type (PacketType.VIDEO_DATA or PacketType.AUDIO_DATA).
+    """
     chunks = []
     total_len = len(frame_data)
     total_chunks = (total_len + UDP_MAX_PAYLOAD - 1) // UDP_MAX_PAYLOAD
@@ -168,7 +186,7 @@ def chunk_frame(client_id: int, room_id: int, frame_id: int, frame_data: bytes) 
         start = i * UDP_MAX_PAYLOAD
         end = min(start + UDP_MAX_PAYLOAD, total_len)
         chunk_data = frame_data[start:end]
-        packet = pack_udp_chunk(client_id, room_id, frame_id, i, total_chunks, chunk_data)
+        packet = pack_udp_chunk(client_id, room_id, frame_id, i, total_chunks, chunk_data, pkt_type)
         chunks.append(packet)
 
     return chunks
