@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
-    pyqtSlot
+    pyqtSlot,
+    QTimer
 )
 
 from PyQt6.QtGui import (
@@ -74,6 +75,9 @@ class CameraFrame(QLabel):
 
     def set_image(self, cv_frame: np.ndarray):
         """Convert an OpenCV frame into a QPixmap and display it."""
+        if not self.camera_on:
+            return
+
         rgb_frame = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2RGB)
         height, width, channels = rgb_frame.shape
         bytes_per_line = channels * width
@@ -194,6 +198,15 @@ class MainWindow(QMainWindow):
         self.slot_clients = {}
         self.client = None  # HexaClient reference for toolbar controls
 
+        # Debounce timers for camera/mic toggles
+        self.camera_debounce_timer = QTimer()
+        self.camera_debounce_timer.setSingleShot(True)
+        self.camera_debounce_timer.timeout.connect(self._do_toggle_camera)
+
+        self.mic_debounce_timer = QTimer()
+        self.mic_debounce_timer.setSingleShot(True)
+        self.mic_debounce_timer.timeout.connect(self._do_toggle_mic)
+
         self.setup_ui()
 
         self.network_frame_signal.connect(self.update_frame_slot)
@@ -266,7 +279,14 @@ class MainWindow(QMainWindow):
         self.client = client
 
     def toggle_camera(self):
-        """Toggle camera on/off and inform client."""
+        """Request camera toggle with debounce."""
+        if not self.client:
+            return
+        # Start/Restart debounce timer (200ms)
+        self.camera_debounce_timer.start(200)
+
+    def _do_toggle_camera(self):
+        """Actually perform the camera toggle after debounce."""
         if not self.client:
             return
         new_state = self.camera_btn.isChecked()
@@ -276,13 +296,19 @@ class MainWindow(QMainWindow):
         # Immediately update local tile for instant feedback
         local_client_id = self.client.client_id
         if local_client_id is not None:
-            # Find the slot for this client
             slot_id = self.client_slots.get(local_client_id)
             if slot_id and slot_id in self.video_frames:
                 self.video_frames[slot_id].set_camera_on(new_state)
 
     def toggle_mic(self):
-        """Toggle mic mute/unmute and inform client."""
+        """Request mic toggle with debounce."""
+        if not self.client:
+            return
+        # Start/Restart debounce timer (200ms)
+        self.mic_debounce_timer.start(200)
+
+    def _do_toggle_mic(self):
+        """Actually perform the mic toggle after debounce."""
         if not self.client:
             return
         muted = self.mic_btn.isChecked()

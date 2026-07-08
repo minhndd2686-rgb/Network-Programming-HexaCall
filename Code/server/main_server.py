@@ -257,7 +257,7 @@ class MasterServer:
                         # This is a state update from client
                         current_room = self.room_manager.get_client_room(client_id)
                         if current_room:
-                            changed = self.room_manager.check_and_update_state(
+                            changed = self.room_manager.update_participant_state(
                                 client_id,
                                 camera_on=camera_on,
                                 mic_muted=mic_muted

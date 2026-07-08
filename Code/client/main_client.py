@@ -6,7 +6,9 @@ import os
 import argparse
 import time
 from collections import deque
-from typing import Optional
+from typing import Optional, Dict
+
+import numpy as np
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -15,7 +17,8 @@ from Code.client.media.frame_processor import FrameProcessor
 from Code.client.media.audio_processor import AudioProcessor, PYAUDIO_AVAILABLE
 from Code.shared.protocol import (
     recv_message, send_message, PacketType,
-    chunk_frame, unpack_udp_chunk, FrameReassembler
+    chunk_frame, unpack_udp_chunk, FrameReassembler,
+    AUDIO_BYTES_PER_FRAME, AUDIO_FRAME_MS
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -55,8 +58,9 @@ class HexaClient:
             except Exception as e:
                 logging.warning(f"Failed to initialize AudioProcessor: {e}")
 
-        # Audio jitter buffer for playback
-        self.audio_jitter_buffer = deque(maxlen=100)  # ~2 seconds buffer
+        # Per-sender audio jitter buffers to prevent stream interleaving
+        # sender_id -> deque(max 8 frames ≈ 160ms buffer per user)
+        self._sender_audio_buffers: Dict[int, deque] = {}
         self._audio_lock = threading.Lock()
         self._audio_playback_thread: Optional[threading.Thread] = None
 
@@ -125,10 +129,12 @@ class HexaClient:
         while not self.stop_event.is_set():
             try:
                 # === VIDEO: Capture and send if camera is on ===
+                start_time = time.time()
                 if self.camera_on.is_set():
                     result = self.processor.capture_and_compress(return_frame=True)
                 else:
                     result = (None, None)
+
 
                 compressed_bytes, raw_frame = result if isinstance(result, tuple) else (result, None)
 
@@ -172,7 +178,7 @@ class HexaClient:
                     if audio_bytes:
                         # Audio frame is small enough to not need chunking (640 bytes)
                         # Use same chunk_frame function with PacketType.AUDIO_DATA
-                        chunks = chunk_frame(self.client_id, self.room_id, audio_frame_id, audio_bytes)
+                        chunks = chunk_frame(self.client_id, self.room_id, audio_frame_id, audio_bytes, PacketType.AUDIO_DATA)
                         for chunk in chunks:
                             try:
                                 self.udp_sock.sendto(chunk, server_udp_addr)
@@ -184,8 +190,10 @@ class HexaClient:
             except Exception as e:
                 logging.error(f"Sender loop error: {e}")
 
-            # Keep preview/update rate bounded so the GUI event queue stays healthy.
-            time.sleep(0.03)  # ~33 FPS
+            # Dynamic sleep to maintain ~30 FPS and avoid server overload
+            elapsed = time.time() - start_time
+            sleep_time = max(0, 0.033 - elapsed)
+            time.sleep(sleep_time)
 
     def run(self, room_id=1, gui_window=None):
         """Main loop to receive UDP chunks and dispatch frames to the GUI.
@@ -263,9 +271,11 @@ class HexaClient:
                                         logging.debug("Received frame for client %s but no GUI attached", sender_id)
 
                             elif pkt_type == PacketType.AUDIO_DATA:
-                                # Audio frame - put into jitter buffer for playback
+                                # Audio frame - put into per-sender jitter buffer for playback
                                 with self._audio_lock:
-                                    self.audio_jitter_buffer.append(full_frame_bytes)
+                                    if sender_id not in self._sender_audio_buffers:
+                                        self._sender_audio_buffers[sender_id] = deque(maxlen=8)  # ~160ms buffer per sender
+                                    self._sender_audio_buffers[sender_id].append(full_frame_bytes)
                                 # Signal GUI to update mic status if needed
                                 # (handled by ROOM_STATE from server)
                             else:
@@ -283,6 +293,15 @@ class HexaClient:
         logging.info("Cleaning up...")
         self.stop_event.set()
 
+        # Stop audio processor explicitly (closes PyAudio streams/threads)
+        if self.audio_processor:
+            try:
+                self.audio_processor.cleanup()
+                logging.info("AudioProcessor cleaned up")
+            except Exception as e:
+                logging.error(f"Error during AudioProcessor cleanup: {e}")
+            self.audio_processor = None
+
         # Send LEAVE_ROOM message before disconnecting
         if self.tcp_sock and self.room_id:
             try:
@@ -290,15 +309,15 @@ class HexaClient:
             except:
                 pass
 
-        # Stop audio processing
-        if self.audio_processor:
-            self.audio_processor.cleanup()
-            self.audio_processor = None
-
         # Wait for audio playback thread to exit
         if self._audio_playback_thread and self._audio_playback_thread.is_alive():
             self._audio_playback_thread.join(timeout=2.0)
             self._audio_playback_thread = None
+
+        # Clear all per-sender audio buffers
+        if self._sender_audio_buffers:
+            with self._audio_lock:
+                self._sender_audio_buffers.clear()
 
         # Close sockets
         if self.tcp_sock:
@@ -359,25 +378,100 @@ class HexaClient:
         except Exception as e:
             logging.error(f"Failed to send state update: {e}")
 
+    def _mix_audio_frames(self) -> Optional[bytes]:
+        """
+        Mix audio frames from all sender buffers into a single frame.
+        Each sender contributes their LATEST frame (drop-oldest policy).
+        Skips own audio to prevent echo.
+
+        Returns:
+            Mixed audio bytes (PCM 16-bit mono) or None if no audio to play.
+        """
+        with self._audio_lock:
+            if not self._sender_audio_buffers:
+                return None
+
+            # Collect LATEST frame from each sender
+            sender_frames = []
+            senders_to_remove = []
+
+            for sender_id, buffer in self._sender_audio_buffers.items():
+                # Skip own audio to prevent echo
+                if sender_id == self.client_id:
+                    continue
+
+                if buffer:
+                    # Take the LATEST frame (rightmost), drop older ones
+                    frame_bytes = buffer.pop()
+                    frame = np.frombuffer(frame_bytes, dtype=np.int16).astype(np.int32)
+                    sender_frames.append(frame)
+                else:
+                    # Mark empty buffers for removal
+                    senders_to_remove.append(sender_id)
+
+            # Clean up empty sender buffers
+            for sid in senders_to_remove:
+                del self._sender_audio_buffers[sid]
+
+            if not sender_frames:
+                return None
+
+            # Mix: average all frames to prevent clipping
+            # When 6 people speak, averaging keeps volume reasonable
+            mixed = np.zeros_like(sender_frames[0])
+            for frame in sender_frames:
+                mixed += frame
+
+            # Normalize by number of senders (prevents clipping when 6 people speak)
+            mixed = mixed // len(sender_frames)
+
+            # Clip to int16 range (just in case)
+            mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
+
+            return mixed.tobytes()
+
     def _audio_playback_loop(self):
-        """Background thread to play audio from jitter buffer."""
+        """Background thread to mix and play audio from per-sender buffers."""
         logging.info("Audio playback loop started")
+
+        frame_interval = AUDIO_FRAME_MS / 1000.0  # Convert ms to seconds
+        last_frame_time = time.time()
 
         while not self.stop_event.is_set():
             try:
-                # Wait for audio data with timeout
-                with self._audio_lock:
-                    if self.audio_jitter_buffer and self.audio_processor:
-                        audio_data = self.audio_jitter_buffer.popleft()
-                        self.audio_processor.play_frame(audio_data)
+                current_time = time.time()
+                elapsed = current_time - last_frame_time
+
+                # If it's time for next frame (20ms interval)
+                if elapsed >= frame_interval:
+                    # Mix audio from all senders
+                    mixed_audio = self._mix_audio_frames()
+
+                    if mixed_audio is not None and self.audio_processor:
+                        self.audio_processor.play_frame(mixed_audio)
+
+                    last_frame_time = current_time
+                else:
+                    # Sleep for remaining time to maintain 20ms interval
+                    sleep_time = frame_interval - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
                     else:
-                        # No data, sleep briefly to avoid busy loop
-                        time.sleep(0.05)
+                        # If we're significantly behind, just continue without sleeping
+                        pass
+
             except Exception as e:
                 logging.error(f"Audio playback loop error: {e}")
                 time.sleep(0.1)
 
         logging.info("Audio playback loop exited")
+
+    def _remove_sender_buffer(self, sender_id: int):
+        """Remove audio buffer when a sender disconnects."""
+        with self._audio_lock:
+            if sender_id in self._sender_audio_buffers:
+                del self._sender_audio_buffers[sender_id]
+                logging.debug("Removed audio buffer for disconnected client %d", sender_id)
 
     def _tcp_listener_loop(self):
         """Background thread to listen for ROOM_STATE updates from server."""
@@ -396,10 +490,13 @@ class HexaClient:
                 if msg_type == PacketType.ROOM_STATE:
                     # Update GUI with participant states
                     participants = payload.get("participants", [])
+                    current_participant_ids = set()
+
                     if self.gui_window and participants:
                         for p in participants:
                             try:
                                 client_id = p.get("client_id")
+                                current_participant_ids.add(client_id)
                                 camera_on = p.get("camera_on", True)
                                 mic_muted = p.get("mic_muted", False)
 
@@ -412,6 +509,14 @@ class HexaClient:
                                         frame.set_mic_muted(mic_muted)
                             except Exception as e:
                                 logging.error(f"Failed to update participant state: {e}")
+
+                    # Clean up audio buffers for disconnected participants
+                    with self._audio_lock:
+                        disconnected = set(self._sender_audio_buffers.keys()) - current_participant_ids
+                        for sid in disconnected:
+                            if sid != self.client_id:  # Don't remove own buffer
+                                del self._sender_audio_buffers[sid]
+                                logging.debug("Removed audio buffer for disconnected client %d", sid)
 
                 elif msg_type == PacketType.ERROR:
                     logging.warning(f"Server error: {payload.get('reason')}")
