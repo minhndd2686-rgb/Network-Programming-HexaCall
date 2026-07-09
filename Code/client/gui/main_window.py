@@ -340,7 +340,63 @@ class MainWindow(QMainWindow):
             return
         self.slot_clients.pop(slot_id, None)
         self.video_frames[slot_id].reset()
+        # Rebuild layout to fill the gap left by the disconnected client
+        self.rebuild_participant_layout()
         print(f"[INFO] Client {client_id} (slot {slot_id}) disconnected.")
+
+    def remove_participant_widget(self, client_id: int):
+        """
+        Remove a participant's widget when they disconnect.
+
+        This method is thread-safe and can be called from any thread.
+        It emits a signal to remove the widget in the GUI thread.
+        """
+        # Emit signal to remove widget in GUI thread-safe manner
+        self.disconnect_signal.emit(client_id)
+
+    def rebuild_participant_layout(self):
+        """
+        Rebuild the participant grid layout to fill gaps after disconnections.
+
+        This method ensures that:
+        - Empty slots are removed from the layout
+        - Remaining participants are shifted to fill gaps
+        - The layout remains contiguous with no empty placeholders
+        """
+        # Get the central widget's layout
+        central_widget = self.centralWidget()
+        if not central_widget:
+            return
+
+        grid_layout = central_widget.layout()
+        if not grid_layout:
+            return
+
+        # Remove all widgets from the grid (iterate backwards to avoid index shift)
+        for i in range(grid_layout.count() - 1, -1, -1):
+            item = grid_layout.itemAt(i)
+            if item and item.widget():
+                grid_layout.removeWidget(item.widget())
+
+        # Collect all currently connected clients
+        active_clients = list(self.client_slots.keys())
+
+        # Re-add widgets in the correct order (no gaps)
+        columns = 3
+        for idx, client_id in enumerate(sorted(active_clients)):
+            slot_id = self.client_slots.get(client_id)
+            if slot_id and slot_id in self.video_frames:
+                row = idx // columns
+                column = idx % columns
+                grid_layout.addWidget(self.video_frames[slot_id], row, column)
+
+        # Hide unused slots (those without a client assigned)
+        for slot_id in range(1, self.max_clients + 1):
+            if slot_id not in self.slot_clients:
+                self.video_frames[slot_id].reset()
+                self.video_frames[slot_id].hide()
+            else:
+                self.video_frames[slot_id].show()
 
     def get_camera_frame(self, client_id: int):
         """Return a CameraFrame widget by client ID."""

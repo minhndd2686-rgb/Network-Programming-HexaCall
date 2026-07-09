@@ -145,7 +145,7 @@ def pack_udp_chunk(client_id: int, room_id: int, frame_id: int, chunk_idx: int, 
     )
     return header + data
 
-def unpack_udp_chunk(data: bytes) -> Optional[Tuple[int, int, int, int, int, bytes]]:
+def unpack_udp_chunk(data: bytes) -> Optional[Tuple[int, int, int, int, int, int, bytes]]:
     """
     Unpacks a video or audio chunk.
     Returns (client_id, room_id, frame_id, chunk_idx, total_chunks, payload) or None if invalid.
@@ -166,7 +166,7 @@ def unpack_udp_chunk(data: bytes) -> Optional[Tuple[int, int, int, int, int, byt
     if len(payload) != payload_len:
         return None
 
-    return client_id, room_id, frame_id, chunk_idx, total_chunks, payload
+    return client_id, room_id, frame_id, chunk_idx, total_chunks, p_type, payload
 
 def chunk_frame(client_id: int, room_id: int, frame_id: int, frame_data: bytes, pkt_type: int = PacketType.VIDEO_DATA) -> List[bytes]:
     """Splits a large frame into multiple UDP-safe chunks.
@@ -194,10 +194,10 @@ def chunk_frame(client_id: int, room_id: int, frame_id: int, frame_data: bytes, 
 class FrameReassembler:
     """Helper to reassemble frames from UDP chunks with timeout/drop support"""
     def __init__(self, timeout=1.0):
-        self.frames = {} # (client_id, frame_id) -> {chunks: {idx: data}, total: n, timestamp: t}
+        self.frames = {} # (client_id, frame_id) -> {chunks: {idx: data}, total: n, timestamp: t, pkt_type: int}
         self.timeout = timeout
 
-    def add_chunk(self, client_id: int, frame_id: int, chunk_idx: int, total_chunks: int, data: bytes) -> Optional[bytes]:
+    def add_chunk(self, client_id: int, frame_id: int, chunk_idx: int, total_chunks: int, data: bytes, pkt_type: int = PacketType.VIDEO_DATA) -> Optional[Tuple[bytes, int]]:
         key = (client_id, frame_id)
         now = time.time()
 
@@ -208,10 +208,18 @@ class FrameReassembler:
             self.frames[key] = {
                 'chunks': {},
                 'total': total_chunks,
-                'timestamp': now
+                'timestamp': now,
+                'pkt_type': pkt_type
             }
 
         frame_info = self.frames[key]
+        # All chunks of a single frame must share the same packet type.
+        # If a different packet type arrives for the same (client_id, frame_id),
+        # discard the stale partial frame so we don't mix video/audio.
+        if frame_info['pkt_type'] != pkt_type:
+            del self.frames[key]
+            return None
+
         frame_info['chunks'][chunk_idx] = data
 
         if len(frame_info['chunks']) == frame_info['total']:
@@ -223,8 +231,9 @@ class FrameReassembler:
                     return None
                 complete_frame.extend(frame_info['chunks'][i])
 
+            stored_pkt_type = frame_info['pkt_type']
             del self.frames[key]
-            return bytes(complete_frame)
+            return bytes(complete_frame), stored_pkt_type
 
         return None
 

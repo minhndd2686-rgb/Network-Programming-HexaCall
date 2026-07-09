@@ -65,7 +65,9 @@ class UdpMediaServer:
                     # Packet not in HexaCall format, skipping
                     continue
 
-                client_id, room_id, frame_id, chunk_idx, total_chunks, payload = unpacked
+                # pkt_type is included in the tuple but unused at the server.
+                # We forward raw bytes to keep video/audio routing identical.
+                client_id, room_id, frame_id, chunk_idx, total_chunks, _pkt_type, _payload = unpacked
 
                 # 2. Authorize sender: client must exist via TCP and be in the claimed room,
                 #    and UDP source address must match previously bound address (anti-hijack).
